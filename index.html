@@ -725,7 +725,7 @@
         <button type="button" class="segb" data-mode="withdraw"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg> ڕاکێشان</button>
       </div>
       <div class="banks" id="banks"></div>
-      <div class="wallet-demo-note" id="firebaseWalletDemoNote" style="padding:12px 14px;margin:12px 0;border:1px solid rgba(245,158,11,.35);border-radius:14px;background:rgba(245,158,11,.08);color:#fde68a;font-size:.83rem;line-height:1.9">تێبینی: هەژمار و پرۆفایل بە Firebase پەیوەستن؛ داواکارییەکانی جەزدان و یاری لەم وەشانەدا هێشتا دیمۆ و ناوخۆیین. هیچ پارەی ڕاستەقینە ناگوازرێتەوە.</div>
+      <div class="wallet-demo-note" id="firebaseWalletDemoNote" style="padding:12px 14px;margin:12px 0;border:1px solid rgba(245,158,11,.35);border-radius:14px;background:rgba(245,158,11,.08);color:#fde68a;font-size:.83rem;line-height:1.9">تێبینی: هەژمار، پرۆفایل و داتای ئەپەکە بە Firebase پەیوەستن و بۆ هەمان هەژمار پاشەکەوت دەکرێن؛ بەڵام جەزدان و داواکارییەکان دیمۆن و هیچ پارەی ڕاستەقینە ناگوازرێتەوە.</div>
       <div class="card pnl">
         <div class="steps" id="steps"><i class="on">١</i><i>٢</i><i>٣</i></div>
         <h3 class="sub" id="panelTitle"></h3>
@@ -2208,8 +2208,6 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
 })();
 </script>
 <!-- ================= کۆتایی ================= -->
-<link rel="stylesheet" href="patch.css">
-<script src="patch.js"></script>
 <!-- ================= Spay X: بانەری بچووک + جزدانی یەک لاپەڕە ================= -->
 <!-- ئەم هەموو بلۆکە دابنێ ڕێک پێش </body> (دوای <script src="patch.js"></script>) -->
 <style>
@@ -2521,7 +2519,9 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
   const MK = 'spayx_matches';
   const loadM = () => { try { return JSON.parse(localStorage.getItem(MK)) || []; } catch (e) { return []; } };
   const saveM = l => localStorage.setItem(MK, JSON.stringify(l));
-  Object.defineProperty(PAY, 'game', { enumerable: false, value: { name: 'یاری', color: '#00d4ff', info: '', logo: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" fill="#00d4ff"/><g fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="8" width="18" height="9" rx="4.5"/><path d="M8 10.5v4M6 12.5h4"/></g></svg>') } });
+  if (!Object.prototype.hasOwnProperty.call(PAY, 'game')) {
+    Object.defineProperty(PAY, 'game', { enumerable: false, configurable: true, value: { name: 'یاری', color: '#00d4ff', info: '', logo: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" fill="#00d4ff"/><g fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="8" width="18" height="9" rx="4.5"/><path d="M8 10.5v4M6 12.5h4"/></g></svg>') } });
+  }
   const balIQD = () => Math.round(balanceOf(me()) * RATE);
   function addTx(email, type, iqd) {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -2672,7 +2672,9 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
     ref,
     get,
     set,
-    update
+    update,
+    remove,
+    onValue
   } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-database.js";
 
   const firebaseConfig = {
@@ -2695,6 +2697,72 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
   let trustedAdmin = false;
   let currentProfile = null;
   let authReady = false;
+
+  // هەموو داتای ناوخۆی ئەپەکە بۆ هەمان هەژمار لە Firebase پاشەکەوت دەکرێت.
+  // وشەی نهێنی هەرگیز لێرە پاشەکەوت ناکرێت؛ Firebase Authentication بەڕێوەی دەبات.
+  const CLOUD_EXCLUDED_KEYS = new Set([USERS_KEY, SESSION_KEY, 'spayx_tx', 'spayx_matches']);
+  let cloudUid = null;
+  let cloudUnsubscribe = null;
+  let cloudApplying = false;
+  let cloudHydrated = false;
+  const originalSetItem = Storage.prototype.setItem;
+  const originalRemoveItem = Storage.prototype.removeItem;
+  function encodeStorageKey(key) {
+    const bytes = new TextEncoder().encode(String(key));
+    let binary = '';
+    bytes.forEach(byte => binary += String.fromCharCode(byte));
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+  function shouldCloudSync(key) {
+    return !CLOUD_EXCLUDED_KEYS.has(String(key)) && !String(key).startsWith('firebase:');
+  }
+  async function cloudSaveLocalItem(key, value) {
+    if (!cloudUid || cloudApplying || !shouldCloudSync(key)) return;
+    try {
+      await set(ref(db, 'userData/' + cloudUid + '/localStorage/' + encodeStorageKey(key)), { key: String(key), value: String(value), updatedAt: Date.now() });
+    } catch (error) {
+      console.warn('Spay X cloud save failed for ' + key + ':', error);
+    }
+  }
+  Storage.prototype.setItem = function(key, value) {
+    originalSetItem.call(this, key, value);
+    if (this === localStorage) cloudSaveLocalItem(String(key), String(value));
+  };
+  Storage.prototype.removeItem = function(key) {
+    originalRemoveItem.call(this, key);
+    if (this === localStorage && cloudUid && !cloudApplying && shouldCloudSync(key)) {
+      remove(ref(db, 'userData/' + cloudUid + '/localStorage/' + encodeStorageKey(key)))
+        .catch(error => console.warn('Spay X cloud delete failed for ' + key + ':', error));
+    }
+  };
+  function startUserDataSync(user) {
+    if (cloudUnsubscribe) cloudUnsubscribe();
+    cloudUid = user ? user.uid : null;
+    cloudHydrated = false;
+    if (!user) return;
+    const cloudRef = ref(db, 'userData/' + user.uid + '/localStorage');
+    cloudUnsubscribe = onValue(cloudRef, async snap => {
+      const remote = snap.val() || {};
+      cloudApplying = true;
+      try {
+        for (const item of Object.values(remote)) {
+          if (item && typeof item.key === 'string' && typeof item.value === 'string' && shouldCloudSync(item.key)) {
+            originalSetItem.call(localStorage, item.key, item.value);
+          }
+        }
+      } finally { cloudApplying = false; }
+      // لە یەکەم بارکردندا، داتای هەبووی ئەم وێبگەڕەش بۆ هەمان هەژمار بار دەکرێت.
+      if (!cloudHydrated) {
+        cloudHydrated = true;
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && shouldCloudSync(key) && !remote[encodeStorageKey(key)]) {
+            await cloudSaveLocalItem(key, localStorage.getItem(key));
+          }
+        }
+      }
+    }, error => console.warn('Spay X account data sync failed. Check Firebase Database Rules:', error));
+  }
 
   function readCachedUsers() {
     try {
@@ -2733,7 +2801,7 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
       'auth/wrong-password': 'وشەی نهێنی هەڵەیە.',
       'auth/too-many-requests': 'هەوڵی زۆر دراوە؛ کەمێک چاوەڕێ بکە و دووبارە هەوڵ بدە.',
       'auth/network-request-failed': 'پەیوەندیی ئینتەرنێت کێشەی هەیە.',
-      'auth/unauthorized-domain': 'ئەم دۆمەینە لە Firebase ڕێگەپێدراو نییە. لە Authentication → Settings → Authorized domains، sheryy134.github.io زیاد بکە.',
+      'auth/unauthorized-domain': 'ئەم دۆمەینە لە Firebase ڕێگەپێدراو نییە. لە Firebase Authentication → Settings → Authorized domains، دۆمەینی spay-x.web.app زیاد بکە.',
       'auth/requires-recent-login': 'بۆ ئەم گۆڕانکارییە پێویستە دووبارە چوونەژوورەوە بکەیت.',
       'PERMISSION_DENIED': 'دەستڕاگەیشتنی داتابەیس ڕەتکرایەوە؛ ڕێساکانی Firebase پشکنە.'
     };
@@ -2853,6 +2921,7 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
   onAuthStateChanged(auth, async user => {
     authReady = true;
     if (!user) {
+      startUserDataSync(null);
       trustedAdmin = false;
       currentProfile = null;
       localStorage.removeItem(SESSION_KEY);
@@ -2872,6 +2941,7 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
       console.warn('Could not read trusted admin claim:', error);
     }
     sessionStorage.setItem('spayx_admin', trustedAdmin ? '1' : '0');
+    startUserDataSync(user);
     const profile = await loadProfile(user);
     if (typeof window.showDashboard === 'function') window.showDashboard(profile);
   });
@@ -2880,5 +2950,202 @@ main{padding:14px 14px 30px!important;max-width:520px!important}
 </script>
 <!-- ===== کۆتایی بەستنی Firebase ===== -->
 
+<!-- ===== Spay X: پانێڵی ئەدمین (ئەم هەموو بلۆکە دابنێ ڕێک پێش </body>، دوای بلۆکی Firebase) ===== -->
+<script type="module">
+import { getApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
+import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js";
+import { getDatabase, ref, get, set, update, remove, onValue, query, orderByChild, equalTo } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-database.js";
+
+const app = getApp(), auth = getAuth(app), db = getDatabase(app);
+const $ = s => document.querySelector(s);
+const nf = n => Number(n).toLocaleString('en-US');
+const RATE = 1500, FEE = 0;            // هەمان RATE و FEE ی index.html
+const TXK = 'spayx_tx', MK = 'spayx_matches';
+let uid = null, isAdmin = false, tab = 'stats';
+let U = {}, A = {}, B = {}, T = {}, M = {};
+let offUser = [], offAdmin = [];
+let syncing = false;
+const last = { tx: {}, m: {} };
+
+/* ---------- ١. هاوکاتکردنی مامەڵە و یاریەکان لەگەڵ Firebase ---------- */
+// هەر جارێک ئەپەکە localStorage بنووسێت، گۆڕانکارییەکان دەنێرین بۆ Firebase
+const rawSet = Storage.prototype.setItem;
+Storage.prototype.setItem = function (k, v) {
+  rawSet.call(this, k, v);
+  if (!syncing && this === localStorage && (k === TXK || k === MK)) push(k, v);
+};
+function push(k, v) {
+  if (!uid) return;
+  let list; try { list = JSON.parse(v); } catch { return; }
+  const isTx = k === TXK, node = isTx ? 'transactions' : 'matches', memo = isTx ? last.tx : last.m;
+  list.forEach(i => {
+    const s = JSON.stringify(i);
+    if (!i.id || memo[i.id] === s) return;
+    const fresh = !memo[i.id];
+    memo[i.id] = s;
+    set(ref(db, node + '/' + i.id), i).then(() => {
+      if (isTx && fresh && i.type === 'deposit' && i.method !== 'game' && window.__proof) {
+        set(ref(db, 'proofs/' + i.id), window.__proof); window.__proof = '';
+      }
+    }).catch(e => { delete memo[i.id]; console.warn('sync failed', e); });
+  });
+}
+// وێنەی پسوولە: بچووک دەکرێتەوە و بۆ ئەدمین دەنێردرێت
+document.addEventListener('change', e => {
+  if (e.target.id !== 'txProof' || !e.target.files[0]) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, 900 / Math.max(im.width, im.height)), c = document.createElement('canvas');
+      c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      window.__proof = c.toDataURL('image/jpeg', .6);
+    };
+    im.src = rd.result;
+  };
+  rd.readAsDataURL(e.target.files[0]);
+});
+// هەر گۆڕانکارییەک لە Firebase دێت، دەیخەینە ناو localStorage ی ئەپەکە
+function mirror(k, obj, memo) {
+  const list = Object.values(obj || {}).sort((a, b) => a.id > b.id ? 1 : -1);
+  list.forEach(i => { memo[i.id] = JSON.stringify(i); });
+  syncing = true; try { localStorage.setItem(k, JSON.stringify(list)); } finally { syncing = false; }
+  const p = document.querySelector('.page.active')?.dataset.page;
+  if (k === TXK) { if (window.renderWallet) window.renderWallet(); }
+  else if (p === 'games') { const y = scrollY; window.showPage('games'); scrollTo(0, y); }
+}
+
+/* ---------- ٢. پانێڵی ئەدمین ---------- */
+const css = document.createElement('style');
+css.textContent = '#adminBox{display:none!important}.ad-n{display:block;color:#8a8a8a;font-size:.72rem;margin-top:4px}.ad-badge{color:#00d4ff;font-weight:800}.ad-ban{color:#ff3b5c;font-weight:800}';
+document.head.appendChild(css);
+
+const nav = document.createElement('button');
+nav.className = 'ti'; nav.type = 'button'; nav.hidden = true; nav.dataset.page = 'admin';
+nav.innerHTML = '<span><svg class="i" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></span><small>ئەدمین</small>';
+$('.tabbar').appendChild(nav);
+nav.onclick = () => { window.showPage('admin'); render(); };
+const pg = document.createElement('div');
+pg.className = 'page'; pg.dataset.page = 'admin';
+$('#dashboard').insertBefore(pg, $('#toast'));
+
+window.spayxIsAdmin = () => isAdmin;
+
+const nm = em => { const u = Object.values(U).find(x => x.email === em); return esc(u ? u.name : em); };
+const bal = em => Math.round(Object.values(T).filter(t => t.email === em && t.status === 'approved').reduce((s, t) => s + (t.type === 'deposit' ? t.amount : -t.amount), 0) * RATE);
+const row = (t, s, b) => '<div class="mg-row"><div><b>' + t + '</b><small>' + s + '</small></div><div class="mg-acts">' + (b || '') + '</div></div>';
+const btn = (a, id, txt, c, w) => '<button class="mg-b ' + (c || '') + '" data-a="' + a + '" data-id="' + esc(id) + '"' + (w ? ' data-w="' + esc(w) + '"' : '') + '>' + txt + '</button>';
+const SL = { pending: 'چاوەڕوان', approved: 'پەسەندکراو', rejected: 'ڕەتکراوە' };
+const ML = { open: 'چاوەڕێی بەرامبەر', playing: 'یاری دەکرێت', dispute: 'کێشە', done: 'تەواو', cancelled: 'هەڵوەشاوە' };
+const TABS = [['stats', 'ئامار'], ['req', 'داواکاری'], ['games', 'یاری'], ['users', 'بەکارهێنەر']];
+
+function render() {
+  if (!isAdmin) return;
+  const tx = Object.values(T).sort((a, b) => a.id < b.id ? 1 : -1);
+  const ms = Object.values(M).sort((a, b) => a.id < b.id ? 1 : -1);
+  const pend = tx.filter(t => t.status === 'pending'), disp = ms.filter(m => m.status === 'dispute');
+  let h = '<h2 class="ptitle">پانێڵی ئەدمین</h2><div class="mg-chips">' + TABS.map(t => '<button type="button" class="mg-chip' + (t[0] === tab ? ' on' : '') + '" data-c="' + t[0] + '">' + t[1] + (t[0] === 'req' && pend.length ? ' (' + pend.length + ')' : '') + (t[0] === 'games' && disp.length ? ' (' + disp.length + ')' : '') + '</button>').join('') + '</div>';
+
+  if (tab === 'stats') {
+    const real = t => t.status === 'approved' && t.method !== 'game';
+    const sum = f => nf(Math.round(tx.filter(f).reduce((s, t) => s + t.amount, 0) * RATE));
+    const st = [['بەکارهێنەر', Object.keys(U).length], ['داواکاری چاوەڕوان', pend.length], ['کێشەی یاری', disp.length],
+      ['کۆی زیادکردن', sum(t => real(t) && t.type === 'deposit')], ['کۆی ڕاکێشان', sum(t => real(t) && t.type === 'withdraw')],
+      ['یاری چالاک', ms.filter(m => m.status === 'open' || m.status === 'playing').length]];
+    h += '<div class="pf-stats">' + st.map(s => '<div class="card pf-stat"><b>' + s[1] + '</b><small>' + s[0] + '</small></div>').join('') + '</div>';
+  }
+  if (tab === 'req') {
+    h += tx.filter(t => t.method !== 'game').slice(0, 60).map(t => {
+      const p = PAY[t.method] ? PAY[t.method].name : t.method, dep = t.type === 'deposit';
+      const b = t.status === 'pending' ? btn('ok', t.id, 'پەسەند', 'win') + btn('no', t.id, 'ڕەت', 'lose') : '';
+      const im = dep && t.status === 'pending' ? btn('img', t.id, 'پسوولە', 'gh') : '';
+      return row(nm(t.email) + ' · ' + (dep ? 'زیادکردن' : 'ڕاکێشان') + ' · ' + nf(Math.round(t.amount * RATE)) + ' دینار',
+        p + ' · ' + t.date + ' · <span class="ad-badge">' + (SL[t.status] || t.status) + '</span>' + (t.to ? '<span class="ad-n" dir="ltr">' + esc(t.to) + '</span>' : ''), im + b);
+    }).join('') || '<div class="mg-empty">هیچ داواکاریەک نییە</div>';
+  }
+  if (tab === 'games') {
+    h += ms.slice(0, 60).map(m => {
+      let b = '';
+      if (m.status === 'playing' || m.status === 'dispute') b += btn('win', m.id, nm(m.a), '', m.a) + btn('win', m.id, nm(m.b), '', m.b);
+      if (!['done', 'cancelled'].includes(m.status)) b += btn('ref', m.id, 'گەڕاندنەوە', 'gh');
+      return row(esc(m.game) + ' · ' + nf(m.stake) + ' دینار', nm(m.a) + ' ⚔ ' + (m.b ? nm(m.b) : '—') + ' · <span class="ad-badge">' + ML[m.status] + '</span>' + (m.winner ? ' · براوە: ' + nm(m.winner) : ''), b);
+    }).join('') || '<div class="mg-empty">هیچ یاریەک نییە</div>';
+  }
+  if (tab === 'users') {
+    h += Object.entries(U).map(([id, u]) => row(
+      esc(u.name || '—') + (A[id] ? ' <span class="ad-badge">· ئەدمین</span>' : '') + (B[id] ? ' <span class="ad-ban">· ڕاگیراو</span>' : ''),
+      '<span dir="ltr">' + esc(u.email) + '</span> · ' + nf(bal(u.email)) + ' دینار',
+      btn('add', id, '+', 'win') + btn('sub', id, '−', 'lose') + btn('ban', id, B[id] ? 'کردنەوە' : 'ڕاگرتن', 'gh') + btn('adm', id, A[id] ? 'لابردنی ئەدمین' : 'بیکە ئەدمین', ''))).join('') || '<div class="mg-empty">هیچ بەکارهێنەرێک نییە</div>';
+  }
+  pg.innerHTML = h;
+}
+
+const addTx = (email, type, iqd) => {
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  return set(ref(db, 'transactions/' + id), { id, email, type, method: 'game', amount: iqd / RATE, to: '', proof: '', status: 'approved', date: new Date().toLocaleDateString('en-GB') });
+};
+pg.addEventListener('click', async e => {
+  const c = e.target.closest('[data-c]'); if (c) { tab = c.dataset.c; return render(); }
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const a = b.dataset.a, id = b.dataset.id, w = b.dataset.w;
+  try {
+    if (a === 'ok' || a === 'no') {
+      const t = T[id]; if (!t || t.status !== 'pending') return;
+      if (a === 'ok' && t.type === 'withdraw' && bal(t.email) < Math.round(t.amount * RATE)) return toast('باڵانسی بەکارهێنەر بەس نییە');
+      await update(ref(db, 'transactions/' + id), { status: a === 'ok' ? 'approved' : 'rejected' });
+    } else if (a === 'img') {
+      const s = await get(ref(db, 'proofs/' + id));
+      if (!s.exists()) return toast('وێنەی پسوولە نییە');
+      const lb = document.createElement('div'); lb.className = 'sx-lb';
+      const im = document.createElement('img'); im.src = s.val(); lb.appendChild(im);
+      lb.onclick = () => lb.remove(); document.body.appendChild(lb); return;
+    } else if (a === 'win') {
+      const m = M[id]; if (!m || !['playing', 'dispute'].includes(m.status)) return;
+      await update(ref(db, 'matches/' + id), { status: 'done', winner: w });
+      await addTx(w, 'deposit', Math.round(m.stake * 2 * (1 - FEE)));
+    } else if (a === 'ref') {
+      const m = M[id]; if (!m || ['done', 'cancelled'].includes(m.status)) return;
+      await update(ref(db, 'matches/' + id), { status: 'cancelled' });
+      await addTx(m.a, 'deposit', m.stake); if (m.b) await addTx(m.b, 'deposit', m.stake);
+    } else if (a === 'ban') {
+      if (id === uid) return toast('ناتوانیت خۆت ڕابگریت');
+      await (B[id] ? remove(ref(db, 'banned/' + id)) : set(ref(db, 'banned/' + id), true));
+    } else if (a === 'adm') {
+      if (id === uid) return toast('ناتوانیت ئەدمینی خۆت لابەریت');
+      if (!confirm(A[id] ? 'ئەدمینیەتی ئەم کەسە لاببرێت؟' : 'ئەم کەسە بکرێت بە ئەدمین؟')) return;
+      await (A[id] ? remove(ref(db, 'admins/' + id)) : set(ref(db, 'admins/' + id), true));
+    } else if (a === 'add' || a === 'sub') {
+      const v = Math.round(+prompt('بڕ بە دینار بنووسە') || 0); if (!(v > 0)) return;
+      await addTx(U[id].email, a === 'add' ? 'deposit' : 'withdraw', v);
+    }
+    toast('ئەنجام درا ✓');
+  } catch (err) { toast('هەڵە: ' + (err.code || err.message)); }
+});
+
+function setAdmin(v) {
+  offAdmin.forEach(f => f()); offAdmin = [];
+  isAdmin = v; nav.hidden = !v;
+  if (!v) { if (pg.classList.contains('active')) window.showPage('home'); return; }
+  const on = (r, cb) => offAdmin.push(onValue(r, s => { cb(s.val() || {}); render(); }, () => {}));
+  on(ref(db, 'users'), v => { U = v; });
+  on(ref(db, 'admins'), v => { A = v; });
+  on(ref(db, 'banned'), v => { B = v; });
+  on(ref(db, 'transactions'), v => { T = v; });
+  render();
+}
+
+/* ---------- ٣. دەستپێکردن دوای چوونەژوورەوە ---------- */
+onAuthStateChanged(auth, u => {
+  offUser.forEach(f => f()); offUser = [];
+  uid = u ? u.uid : null;
+  if (!u) { setAdmin(false); return; }
+  offUser.push(onValue(ref(db, 'banned/' + u.uid), s => { if (s.val() === true) { toast('هەژمارەکەت ڕاگیراوە'); signOut(auth); } }, () => {}));
+  offUser.push(onValue(query(ref(db, 'transactions'), orderByChild('email'), equalTo(u.email)), s => mirror(TXK, s.val(), last.tx), e => console.warn(e)));
+  offUser.push(onValue(ref(db, 'matches'), s => { M = s.val() || {}; mirror(MK, M, last.m); render(); }, e => console.warn(e)));
+  offUser.push(onValue(ref(db, 'admins/' + u.uid), s => setAdmin(s.val() === true), () => setAdmin(false)));
+});
+</script>
+<!-- ===== کۆتایی پانێڵی ئەدمین ===== -->
 </body>
 </html>
